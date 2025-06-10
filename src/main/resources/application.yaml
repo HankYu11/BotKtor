@@ -5,6 +5,6 @@ ktor:
     port: 8080
 
 postgres:
-  url: "${POSTGRES_URL}"
-  user: "${POSTGRES_USER}"
-  password: "${POSTGRES_PASSWORD}"
+  url: ${POSTGRES_URL}
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
