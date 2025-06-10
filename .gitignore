@@ -34,3 +34,13 @@ out/
 
 ### VS Code ###
 .vscode/
+
+# Configuration files that might contain secrets
+application.yaml
+
+# macOS
+.DS_Store
+
+# Log files
+*.log
+logs/
