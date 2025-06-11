@@ -194,5 +194,8 @@ fun Application.configureSerialization() {
                 }
             }
         }
+        get("/") {
+            call.respondText("Hello World!")
+        }
     }
 }
