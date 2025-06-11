@@ -1,5 +1,7 @@
 ktor:
-  modules: com.hank.ApplicationKt.module
+  application:
+    modules:
+      - com.hank.ApplicationKt.module
   deployment:
     port: 8080
 
