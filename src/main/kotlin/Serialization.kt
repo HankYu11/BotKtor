@@ -1,14 +1,13 @@
 package com.hank
 
 import com.hank.db.GameEntity
-import com.hank.db.PlayerEntity
-import com.hank.model.domain.Player
 import com.hank.model.domain.Result
 import com.hank.model.domain.Round
 import com.hank.model.domain.RoundWithResults
 import com.hank.model.request.CreateGameRequest
 import com.hank.model.request.CreateRoundRequest
 import com.hank.model.response.GameDetails
+import com.hank.model.response.GameWithPlayers
 import com.hank.repository.GameRepository
 import com.hank.repository.PlayerRepository
 import com.hank.repository.ResultRepository
@@ -17,13 +16,9 @@ import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
 import io.ktor.server.plugins.contentnegotiation.*
-import io.ktor.server.plugins.statuspages.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import java.sql.Connection
-import java.sql.DriverManager
-import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.transactions.transaction
 
 fun Application.configureSerialization() {
@@ -55,7 +50,7 @@ fun Application.configureSerialization() {
                 }
 
                 if (players.size == 4) {
-                    call.respond(HttpStatusCode.Created, "Game and players created successfully")
+                    call.respond(HttpStatusCode.Created, GameWithPlayers(game, players))
                 } else {
                     // This case might indicate an issue with player creation,
                     // though create() in PlayerRepository should ideally handle errors gracefully.
