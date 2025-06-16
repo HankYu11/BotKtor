@@ -1,13 +1,14 @@
 package com.hank
 
 import com.hank.db.GameEntity
+import com.hank.model.domain.Player
 import com.hank.model.domain.Result
-import com.hank.model.domain.Round
 import com.hank.model.domain.RoundWithResults
 import com.hank.model.request.CreateGameRequest
 import com.hank.model.request.CreateRoundRequest
 import com.hank.model.response.GameDetails
 import com.hank.model.response.GameWithPlayers
+import com.hank.model.response.RoundDetails
 import com.hank.repository.GameRepository
 import com.hank.repository.PlayerRepository
 import com.hank.repository.ResultRepository
@@ -120,7 +121,6 @@ fun Application.configureSerialization() {
         route("/round") {
             post("/create") {
                 val request = call.receive<CreateRoundRequest>()
-                // Basic Validations
                 if (request.results.size != 4) {
                     call.respond(HttpStatusCode.BadRequest, "Exactly four player results are required.")
                     return@post
@@ -128,8 +128,7 @@ fun Application.configureSerialization() {
 
                 val gameId = request.gameId
 
-                // Perform database operations within a transaction
-                val createdRoundDetails: Round? = transaction {
+                val createdRoundDetails: RoundDetails? = transaction {
                     // 1. Validate Game
                     val gameEntity = GameEntity.findById(gameId)
                     if (gameEntity == null) {
@@ -141,25 +140,23 @@ fun Application.configureSerialization() {
                     val newRound = roundRepository.create(bet = request.bet, gameId = gameId)
                     if (newRound == null) {
                         call.application.environment.log.error("Failed to create round for game ID $gameId.")
-                        return@transaction null // Will lead to 500 or other error outside
+                        return@transaction null
                     }
 
                     val createdResults = mutableListOf<Result>()
+                    val updatedPlayers = mutableListOf<Player>()
 
                     // 3. Create Results and Update Player Balances
                     for (playerResultRequest in request.results) {
                         val player = playerRepository.findById(playerResultRequest.playerId)
                         if (player == null) {
                             call.application.environment.log.warn("Player with ID ${playerResultRequest.playerId} not found.")
-                            // Rollback transaction by throwing an exception or returning null
-                            // to indicate failure.
                             throw IllegalStateException("Player with ID ${playerResultRequest.playerId} not found.")
                         }
 
-                        // Update player balance
-                        // Assuming PlayerEntity has a 'balance' property.
-                        // Profit can be positive or negative.
-                        playerRepository.updateBalance(player.id, player.balance + (playerResultRequest.profit))
+                        playerRepository.updateBalance(player.id, player.balance + (playerResultRequest.profit))?.let {
+                            updatedPlayers.add(it)
+                        }
 
                         // Create Result
                         val result = resultRepository.create(
@@ -169,22 +166,17 @@ fun Application.configureSerialization() {
                         )
                         if (result == null) {
                             call.application.environment.log.error("Failed to create result for round ${newRound.id} and player ${playerResultRequest.playerId}.")
-                            // Rollback transaction
                             throw IllegalStateException("Failed to create result for player ${playerResultRequest.playerId}.")
                         }
                         createdResults.add(result)
                     }
-                    // If all operations were successful, the transaction will commit.
-                    newRound // Return the created round domain object
+
+                    RoundDetails(round = newRound, players = updatedPlayers, results = createdResults)
                 }
 
                 if (createdRoundDetails != null) {
-                    // You might want to return the full RoundWithResults, or just the created Round, or just a success message.
-                    // For now, returning the created Round object.
                     call.respond(HttpStatusCode.Created, createdRoundDetails)
                 } else {
-                    // Infer error based on logs or specific checks if needed
-                    // This generic error can be improved if more specific states are returned from the transaction block
                     call.respond(HttpStatusCode.InternalServerError, "Failed to create round and results. Check game ID or player IDs.")
                 }
             }
