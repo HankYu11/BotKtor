@@ -1,6 +1,7 @@
 package com.hank
 
 import com.hank.db.GameEntity
+import com.hank.GameUpdateManager
 import com.hank.model.domain.Player
 import com.hank.model.domain.Result
 import com.hank.model.domain.RoundWithResults
@@ -20,17 +21,53 @@ import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.server.sse.SSE
+import io.ktor.server.sse.heartbeat
+import io.ktor.server.sse.sse
+import io.ktor.sse.ServerSentEvent
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.serializer
+import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import org.jetbrains.exposed.sql.transactions.transaction
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 fun Application.configureSerialization() {
     install(ContentNegotiation) {
         json()
     }
+    install(SSE)
 
     val gameRepository = GameRepository()
     val playerRepository = PlayerRepository()
     val roundRepository = RoundRepository()
     val resultRepository = ResultRepository()
+
+    // Helper function to fetch full game details.
+    suspend fun getGameDetails(gameId: Int): GameDetails? {
+        val game = gameRepository.findById(gameId) ?: return null
+        val players = playerRepository.findByGameId(gameId)
+        val rounds = roundRepository.findByGameId(gameId)
+        val roundIds = rounds.map { it.id }
+        val allResultsForGame: List<Result> = if (roundIds.isNotEmpty()) {
+            resultRepository.findByRoundIds(roundIds)
+        } else {
+            emptyList()
+        }
+        val resultsByRoundId: Map<Int, List<Result>> = allResultsForGame.groupBy { it.roundId }
+        val roundWithResultsList: List<RoundWithResults> = rounds.map { round ->
+            RoundWithResults(
+                roundId = round.id,
+                bet = round.bet,
+                results = resultsByRoundId[round.id] ?: emptyList()
+            )
+        }
+        return GameDetails(
+            game = game,
+            players = players,
+            roundWithResults = roundWithResultsList,
+        )
+    }
 
     routing {
         route("/game") {
@@ -116,6 +153,44 @@ fun Application.configureSerialization() {
 
                 call.respond(HttpStatusCode.OK, gameDetails)
             }
+
+            sse("/{id}/sse", serialize = { typeInfo, it ->
+                val serializer = Json.serializersModule.serializer(typeInfo.kotlinType!!)
+                Json.encodeToString(serializer, it)
+            }) {
+                heartbeat {
+                    period = 45.seconds
+                    event = ServerSentEvent("heartbeat")
+                }
+
+                val gameId = call.parameters["id"]?.toIntOrNull()
+                if (gameId == null) {
+                    call.respond(HttpStatusCode.BadRequest, "Game ID must be a number.")
+                    return@sse
+                }
+
+                if (!gameRepository.existsById(gameId)) {
+                    call.respond(HttpStatusCode.NotFound, "Game with ID $gameId not found.")
+                    return@sse
+                }
+
+                try {
+                    // Send the initial state once upon connection.
+                    getGameDetails(gameId)?.let {
+                        val initialStateJson = Json.encodeToString(GameDetails.serializer(), it)
+                        send(ServerSentEvent(data = initialStateJson, event = "update"))
+                    }
+
+                    // Subscribe to the update flow and send events to the client.
+                    GameUpdateManager.getUpdatesFlow(gameId).collect { gameDetails ->
+                        val updateJson = Json.encodeToString(GameDetails.serializer(), gameDetails)
+                        send(ServerSentEvent(data = updateJson, event = "update"))
+                    }
+                } finally {
+                    // This block will be executed when the client disconnects.
+                    println("Client disconnected from game $gameId observation.")
+                }
+            }
         }
 
         route("/round") {
@@ -128,19 +203,19 @@ fun Application.configureSerialization() {
 
                 val gameId = request.gameId
 
-                val createdRoundDetails: RoundDetails? = transaction {
+                val createdRoundDetails: RoundDetails? = newSuspendedTransaction {
                     // 1. Validate Game
                     val gameEntity = GameEntity.findById(gameId)
                     if (gameEntity == null) {
                         call.application.environment.log.warn("Game with ID $gameId not found during round creation.")
-                        return@transaction null // Will lead to 404 or other error outside
+                        return@newSuspendedTransaction null // Will lead to 404 or other error outside
                     }
 
                     // 2. Create Round
                     val newRound = roundRepository.create(bet = request.bet, gameId = gameId)
                     if (newRound == null) {
                         call.application.environment.log.error("Failed to create round for game ID $gameId.")
-                        return@transaction null
+                        return@newSuspendedTransaction null
                     }
 
                     val createdResults = mutableListOf<Result>()
@@ -175,6 +250,11 @@ fun Application.configureSerialization() {
                 }
 
                 if (createdRoundDetails != null) {
+                    // After a successful update, fetch the latest game state.
+                    val updatedGameDetails = getGameDetails(gameId)
+                    if (updatedGameDetails != null) {
+                        GameUpdateManager.notifyUpdate(gameId, updatedGameDetails)
+                    }
                     call.respond(HttpStatusCode.Created, createdRoundDetails)
                 } else {
                     call.respond(HttpStatusCode.InternalServerError, "Failed to create round and results. Check game ID or player IDs.")
@@ -186,3 +266,4 @@ fun Application.configureSerialization() {
         }
     }
 }
+
